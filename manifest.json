@@ -1,0 +1,6 @@
+{
+  "name": "Launchpool Radar",
+  "version": "1.0.0",
+  "description": "自动抓取 Aevo 盘前价格并测算 Binance Launchpool 新币初始市值的雷达工具。",
+  "entrypoint": "launchpool_radar.py"
+}
