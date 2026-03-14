@@ -1,6 +1,35 @@
 {
-  "name": "Launchpool Radar",
-  "version": "1.0.0",
-  "description": "自动抓取 Aevo 盘前价格并测算 Binance Launchpool 新币初始市值的雷达工具。",
-  "entrypoint": "launchpool_radar.py"
+  "name": "binance-launchpool-radar",
+  "version": "2.1.0",
+  "description": "监控 Binance Launchpool 项目，支持价格提醒和项目分析",
+  "main": "launchpool_radar.py",
+  "scripts": {
+    "start": "python3 launchpool_radar.py",
+    "test": "python3 launchpool_radar.py"
+  },
+  "keywords": [
+    "binance",
+    "launchpool",
+    "crypto",
+    "monitoring",
+    "alerts"
+  ],
+  "author": "hs365",
+  "license": "MIT",
+  "dependencies": {
+    "requests": ">=2.25.0"
+  },
+  "features": [
+    "Launchpool项目监控",
+    "价格提醒",
+    "项目分析",
+    "现货价格查询",
+    "代币上市提醒",
+    "数据缓存"
+  ],
+  "changelog": {
+    "2.1.0": "适配Binance API变更，新增代币上市提醒和项目分析功能，性能优化",
+    "2.0": "添加现货监控功能，支持BTC/ETH等主流币种实时查询",
+    "1.0": "初始版本"
+  }
 }

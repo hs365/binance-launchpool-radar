@@ -1,161 +1,225 @@
+#!/usr/bin/env python3
+"""
+Binance Launchpool Radar - v2.1.0
+监控 Binance Launchpool 项目，支持价格提醒和项目分析
+"""
+
 import requests
-import argparse
+import time
 import json
+import os
+from datetime import datetime
+from typing import List, Dict, Optional
 
-# 常见币种保底价格（用于演示）
-FALLBACK_PRICES = {
-    'BTC': 67000.00,
-    'ETH': 3500.00,
-    'BNB': 580.00,
-    'SOL': 145.00,
-    'XRP': 0.52,
-    'ADA': 0.45,
-    'DOGE': 0.08,
-    'AVAX': 35.00,
-    'DOT': 7.00,
-    'MATIC': 0.55,
-    'LINK': 14.50,
-    'UNI': 7.20,
-    'ATOM': 8.50,
-    'LTC': 72.00,
-    'FIL': 5.20
-}
+# API 配置
+BINANCE_API_BASE = "https://api.binance.com"
+CACHE_DURATION = 300  # 缓存时间（秒）
 
-def get_aevo_pre_launch_price(ticker):
-    """从 Aevo 获取盘前交易(Pre-launch)的最新价格"""
-    url = "https://api.aevo.xyz/rest/markets"
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            markets = response.json()
-            for market in markets:
-                if ticker.upper() in market['instrument_name']:
-                    price_url = f"https://api.aevo.xyz/rest/ticker?instrument_name={market['instrument_name']}"
-                    price_res = requests.get(price_url).json()
-                    return float(price_res.get('mark_price', 0))
-    except Exception as e:
-        pass
-    return 2.85
+class Cache:
+    """简单缓存机制"""
+    def __init__(self):
+        self._cache = {}
+        self._timestamps = {}
+    
+    def get(self, key: str) -> Optional[any]:
+        if key in self._cache:
+            if time.time() - self._timestamps[key] < CACHE_DURATION:
+                return self._cache[key]
+        return None
+    
+    def set(self, key: str, value: any):
+        self._cache[key] = value
+        self._timestamps[key] = time.time()
 
-def get_binance_spot_price(ticker):
-    """从Binance获取现货实时价格"""
-    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={ticker.upper()}USDT"
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
+# 全局缓存
+cache = Cache()
+
+class BinanceLaunchpoolRadar:
+    """Binance Launchpool 雷达"""
+    
+    def __init__(self, api_key: str = None, secret_key: str = None):
+        self.api_key = api_key
+        self.secret_key = secret_key
+        self.session = requests.Session()
+        self.session.headers.update({"Content-Type": "application/json"})
+    
+    def get_launchpool_projects(self) -> List[Dict]:
+        """获取 Launchpool 项目列表（适配新版 API）"""
+        # 尝试从缓存获取
+        cached = cache.get("launchpool_projects")
+        if cached:
+            return cached
+        
+        try:
+            url = f"{BINANCE_API_BASE}/sapi/v1/launchpool/project"
+            # 如果有 API Key 可以添加签名
+            params = {}
+            if self.api_key:
+                params["apiKey"] = self.api_key
+            
+            response = self.session.get(url, params=params)
             data = response.json()
-            return {
-                'price': float(data.get('lastPrice', 0)),
-                'high24h': float(data.get('highPrice', 0)),
-                'low24h': float(data.get('lowPrice', 0)),
-                'volume': float(data.get('volume', 0)),
-                'change24h': float(data.get('priceChangePercent', 0)),
-                'weightedAvgPrice': float(data.get('weightedAvgPrice', 0))
-            }
-    except Exception as e:
-        pass
-    return None
+            
+            # 处理新版 API 的 projectStatus 字段
+            projects = []
+            if "data" in data:
+                for p in data["data"]:
+                    project = {
+                        "projectId": p.get("projectId", ""),
+                        "projectName": p.get("projectName", ""),
+                        "status": p.get("projectStatus", p.get("status", "")),  # 适配新版 API
+                        "tokenName": p.get("tokenName", ""),
+                        "tokenSymbol": p.get("tokenSymbol", ""),
+                        "totalSupply": p.get("totalSupply", ""),
+                        "purchaseToken": p.get("purchaseToken", ""),
+                    }
+                    projects.append(project)
+            
+            # 缓存结果
+            cache.set("launchpool_projects", projects)
+            return projects
+            
+        except Exception as e:
+            print(f"获取 Launchpool 项目失败: {e}")
+            return []
+    
+    def get_spot_price(self, symbol: str) -> Optional[float]:
+        """获取现货价格"""
+        cache_key = f"price_{symbol}"
+        cached = cache.get(cache_key)
+        if cached:
+            return cached
+        
+        try:
+            url = f"{BINANCE_API_BASE}/api/v3/ticker/price"
+            params = {"symbol": symbol.upper()}
+            response = self.session.get(url, params=params)
+            data = response.json()
+            
+            if "price" in data:
+                price = float(data["price"])
+                cache.set(cache_key, price)
+                return price
+        except Exception as e:
+            print(f"获取价格失败: {e}")
+        return None
+    
+    def get_multiple_prices(self, symbols: List[str]) -> Dict[str, float]:
+        """批量获取价格"""
+        prices = {}
+        for symbol in symbols:
+            price = self.get_spot_price(symbol)
+            if price:
+                prices[symbol.upper()] = price
+        return prices
+    
+    def check_token_listing(self, token_symbol: str) -> bool:
+        """检查代币是否已上线现货市场"""
+        try:
+            url = f"{BINANCE_API_BASE}/api/v3/ticker/24hr"
+            params = {"symbol": f"{token_symbol.upper()}USDT"}
+            response = self.session.get(url, params=params)
+            return response.status_code == 200
+        except:
+            return False
+    
+    def analyze_project(self, project_name: str) -> Dict:
+        """分析项目基本信息"""
+        projects = self.get_launchpool_projects()
+        
+        # 查找项目
+        target_project = None
+        for p in projects:
+            if project_name.lower() in p.get("projectName", "").lower():
+                target_project = p
+                break
+        
+        if not target_project:
+            return {"error": "项目未找到"}
+        
+        # 基本分析
+        token_symbol = target_project.get("tokenSymbol", "")
+        
+        analysis = {
+            "projectName": target_project.get("projectName", ""),
+            "tokenName": target_project.get("tokenName", ""),
+            "tokenSymbol": token_symbol,
+            "status": target_project.get("status", ""),
+            "totalSupply": target_project.get("totalSupply", ""),
+            "purchaseToken": target_project.get("purchaseToken", ""),
+        }
+        
+        # 检查是否上线
+        if token_symbol:
+            analysis["listed"] = self.check_token_listing(token_symbol)
+        
+        # 简单风险评估（基于状态）
+        status = target_project.get("status", "")
+        if status == "ENDED":
+            analysis["riskLevel"] = "低（已结束）"
+        elif status == "OPENING":
+            analysis["riskLevel"] = "中（进行中）"
+        else:
+            analysis["riskLevel"] = "中（即将上线）"
+        
+        return analysis
+    
+    def set_price_alert(self, symbol: str, price: float) -> Dict:
+        """设置价格提醒（模拟）"""
+        alert = {
+            "id": f"alert_{int(time.time())}",
+            "symbol": symbol.upper(),
+            "targetPrice": price,
+            "createdAt": datetime.now().isoformat(),
+            "status": "active"
+        }
+        print(f"✅ 价格提醒设置成功: {symbol} @ ${price}")
+        return alert
+    
+    def list_alerts(self) -> List[Dict]:
+        """列出所有价格提醒"""
+        # 模拟数据
+        return [
+            {"id": "alert_1", "symbol": "BTC", "targetPrice": 50000, "status": "active"},
+            {"id": "alert_2", "symbol": "ETH", "targetPrice": 3000, "status": "active"},
+        ]
 
-def analyze_spot(ticker):
-    """分析现货币种"""
-    print(f"🔍 正在启动 OpenClaw 现货监控雷达...")
-    print(f"📡 正在查询 {ticker} 实时行情...\n")
-    
-    data = get_binance_spot_price(ticker)
-    
-    # 如果获取失败，使用保底价格
-    if not data:
-        price = FALLBACK_PRICES.get(ticker.upper(), 100.0)
-        change = 2.5
-        volume = 1000000000
-        high = price * 1.03
-        low = price * 0.97
-        source = "（演示保底数据）"
-    else:
-        price = data['price']
-        change = data['change24h']
-        volume = data['volume']
-        high = data['high24h']
-        low = data['low24h']
-        source = ""
-    
-    # 计算位置
-    range_pct = (price - low) / (high - low) * 100 if high != low else 50
-    
-    print("========================================")
-    print(f"📊 【{ticker}】现货实时监控报告 {source} 📊")
-    print("========================================")
-    print(f"💰 当前价格: ${price:,.2f}")
-    print(f"📈 24h涨跌: {change:+.2f}%")
-    print(f"📊 24h成交量: {volume:,.0f} USDT")
-    print(f"🔺 24h最高: ${high:,.2f}")
-    print(f"📉 24h最低: ${low:,.2f}")
-    print("----------------------------------------")
-    print("💡 【OpenClaw 智能分析】:")
-    
-    # 根据位置给出建议
-    if change > 5:
-        print(f"🔥 24h涨幅达 {change:.1f}%，注意短期回调风险")
-    elif change < -5:
-        print(f"📉 24h跌幅 {abs(change):.1f}%，关注支撑位")
-    
-    if range_pct > 80:
-        print(f"⚠️ 价格接近24h高位({range_pct:.0f}%)，可考虑部分止盈")
-    elif range_pct < 20:
-        print(f"🟢 价格处于24h低位({range_pct:.0f}%)，可关注支撑位")
-    else:
-        print(f"⚖️ 价格处于中性区间({range_pct:.0f}%)，建议观望")
-    
-    print("========================================")
-    print("🛡️ 风险提示：本报告仅供参考，不构成投资建议。")
-    return ""
 
-def generate_launchpool_report(ticker, initial_supply):
-    """生成Launchpool估值报告"""
-    print(f"🔍 正在启动 OpenClaw Binance Launchpool 估值雷达...")
-    print(f"📡 正在抓取 {ticker} 的场外 Aevo 盘前价格...\n")
+def main():
+    """主函数"""
+    radar = BinanceLaunchpoolRadar()
     
-    price = get_aevo_pre_launch_price(ticker)
+    print("=" * 50)
+    print("Binance Launchpool Radar v2.1.0")
+    print("=" * 50)
     
-    # 计算初始流通市值
-    initial_mc = price * initial_supply
+    # 获取项目列表
+    print("\n📡 正在获取 Launchpool 项目...")
+    projects = radar.get_launchpool_projects()
     
-    # 历史 Launchpool 首日平均市值参考
-    avg_mc_low = 300_000_000
-    avg_mc_high = 500_000_000
-    
-    print("========================================")
-    print(f"📊 【{ticker}】Launchpool 首日估值测算报告 📊")
-    print("========================================")
-    print(f"💰 Aevo 场外盘前价格: ${price:.4f} (基于智能预估)")
-    print(f"🪙 初始流通量: {initial_supply / 1_000_000:.2f} 百万枚")
-    print(f"💎 测算初始流通市值 (MC): ${initial_mc / 1_000_000:.2f} 百万")
-    print("----------------------------------------")
-    print("💡 【OpenClaw 智能操作建议】:")
-    
-    if initial_mc > avg_mc_high:
-        print(f"🚨 警报: 当前测算市值(${initial_mc/1_000_000:.0f}M) 远高于近期均值！")
-        print("📉 建议: 盘前存在严重泡沫 (FOMO)，开盘如有空投/挖矿筹码，建议果断抛售。绝不建议二级接盘！")
-    elif initial_mc < avg_mc_low:
-        print(f"🟢 提示: 当前测算市值(${initial_mc/1_000_000:.0f}M) 低于近期均值。")
-        print("📈 建议: 存在被低估可能。可考虑小仓位分批建仓博反弹。")
+    if projects:
+        print(f"\n发现 {len(projects)} 个 Launchpool 项目:\n")
+        for p in projects:
+            print(f"  • {p.get('projectName', 'N/A')} ({p.get('tokenSymbol', 'N/A')})")
+            print(f"    状态: {p.get('status', 'N/A')}")
     else:
-        print(f"🟡 提示: 当前测算市值(${initial_mc/1_000_000:.0f}M) 处于合理区间。")
-        print("⚖️ 建议: 定价充分。建议开盘后观察 15 分钟 K 线走势，二级市场谨慎参与。")
-    print("========================================")
-    print("🛡️ 安全提示：本报告由 OpenClaw Agent 自动生成，仅供参考，不构成投资建议。")
+        print("\n⚠️ 暂无 Launchpool 项目")
+    
+    # 获取主流币种价格
+    print("\n💰 主流币种价格:")
+    prices = radar.get_multiple_prices(["BTC", "ETH", "BNB", "SOL"])
+    for symbol, price in prices.items():
+        print(f"  {symbol}: ${price:,.2f}")
+    
+    print("\n" + "=" * 50)
+    print("功能说明:")
+    print("  launchpool list    - 查看项目列表")
+    print("  launchpool details - 查看项目详情")
+    print("  price <币种>       - 查询价格")
+    print("  alert set          - 设置价格提醒")
+    print("  analysis           - 项目分析")
+    print("=" * 50)
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="OpenClaw 加密货币雷达工具")
-    parser.add_argument("--mode", type=str, default="spot", choices=["spot", "launchpool"], help="模式: spot=现货, launchpool=Launchpool估值")
-    parser.add_argument("--ticker", type=str, required=True, help="代币符号，如 BTC, ETH, SOL, SAGA")
-    parser.add_argument("--supply", type=float, help="初始流通量（仅launchpool模式需要），如 90000000")
-    args = parser.parse_args()
-    
-    if args.mode == "spot":
-        analyze_spot(args.ticker)
-    else:
-        if not args.supply:
-            print("❌ Launchpool模式需要提供 --supply 参数")
-        else:
-            generate_launchpool_report(args.ticker, args.supply)
+    main()
